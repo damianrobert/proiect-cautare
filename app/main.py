@@ -1,58 +1,56 @@
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
 import time
 import numpy as np
 import faiss
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
+from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from contextlib import asynccontextmanager
+from sklearn.datasets import fetch_20newsgroups
 
-# Setul nostru de date demonstrativ în engleză (Mini-Dataset)
-DOCUMENTS = [
-    "A movie about a fast car on the streets of Tokyo.",
-    "A quick racing automobile wins the championship.",
-    "A funny cat catching mice in the barn.",
-    "An adorable feline sleeping all day on the couch.",
-    "Programming in Python is great for artificial intelligence.",
-    "Vector databases are used for semantic search."
-]
-
-# Variabile globale pentru a stoca modelele și indexurile în memorie
+# Variabile globale
 bm25_index = None
 faiss_index = None
 model = None
+documents = []
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global bm25_index, faiss_index, model
-    print("Se încarcă modelul AI și se construiesc indexurile...")
+    global bm25_index, faiss_index, model, documents
     
-    # 1. Inițializare pentru Căutarea Tradițională (BM25)
-    tokenized_corpus = [doc.lower().split() for doc in DOCUMENTS]
+    print("1. Descărcăm setul de date '20 Newsgroups'...")
+    # Preia texte reale (fără headere de email pentru a păstra textul curat)
+    newsgroups = fetch_20newsgroups(subset='all', remove=('headers', 'footers', 'quotes'))
+    
+    # Filtrăm textele goale sau prea scurte și luăm primele 2000 de documente
+    raw_docs = [doc.replace('\n', ' ').strip() for doc in newsgroups.data if len(doc.strip()) > 50]
+    documents = raw_docs[:2000]
+
+    print(f"2. Am încărcat {len(documents)} documente. Construim indexul Tradițional (BM25)...")
+    tokenized_corpus = [doc.lower().split() for doc in documents]
     bm25_index = BM25Okapi(tokenized_corpus)
 
-    # 2. Inițializare pentru Căutarea Vectorială (FAISS)
-    model = SentenceTransformer('all-MiniLM-L6-v2') # Un model rapid și eficient
-    document_embeddings = model.encode(DOCUMENTS)
+    print("3. Încărcăm modelul AI (MiniLM)...")
+    model = SentenceTransformer('all-MiniLM-L6-v2')
     
-    dimension = document_embeddings.shape[1] # Câte dimensiuni are vectorul (ex: 384)
-    faiss_index = faiss.IndexFlatL2(dimension) # Folosim Distanța Euclidiană
+    print("4. Transformăm documentele în vectori (Acest proces va dura 10-30 de secunde)...")
+    document_embeddings = model.encode(documents)
+    
+    dimension = document_embeddings.shape[1]
+    faiss_index = faiss.IndexFlatL2(dimension)
     faiss_index.add(document_embeddings)
     
-    print("Sistemul este gata!")
+    print("Sistemul este complet gata de utilizare!")
     yield
-    # Aici ar veni codul de curățare la oprirea serverului, dacă ar fi necesar
 
 app = FastAPI(lifespan=lifespan)
 
-# Modelul de date pe care îl primim de la Frontend
 class SearchRequest(BaseModel):
     query: str
 
 @app.get("/")
 def serve_frontend():
-    # Trimitem interfața HTML când utilizatorul accesează browserul
     return FileResponse("app/index.html")
 
 @app.post("/api/search")
@@ -63,23 +61,31 @@ def perform_search(request: SearchRequest):
     start_time_bm25 = time.time()
     tokenized_query = q.lower().split()
     bm25_scores = bm25_index.get_scores(tokenized_query)
-    # Luăm primele 2 cele mai bune rezultate
-    top_n_bm25 = np.argsort(bm25_scores)[::-1][:2] 
-    # Filtrăm rezultatele cu scor 0 (niciun cuvânt nu s-a potrivit)
-    bm25_results = [DOCUMENTS[i] for i in top_n_bm25 if bm25_scores[i] > 0]
-    time_bm25 = (time.time() - start_time_bm25) * 1000 # Convertim în milisecunde
+    
+    # Luăm top 3 rezultate care au scor > 0
+    top_n_bm25 = np.argsort(bm25_scores)[::-1][:3]
+    bm25_results = [documents[i][:300] + "..." for i in top_n_bm25 if bm25_scores[i] > 0]
+    time_bm25 = (time.time() - start_time_bm25) * 1000
 
     # --- Traseul 2: Căutare Vectorială (FAISS) ---
     start_time_vector = time.time()
     query_vector = model.encode([q])
-    # Căutăm cei mai apropiați 2 vecini
-    distances, indices = faiss_index.search(query_vector, 2) 
-    vector_results = [DOCUMENTS[i] for i in indices[0]]
+    
+    # Căutăm top 3 rezultate
+    distances, indices = faiss_index.search(query_vector, 3) 
+    
+    vector_results = []
+    for dist, idx in zip(distances[0], indices[0]):
+        # Formatăm rezultatul pentru a arăta și distanța matematică
+        score_text = f"<strong>[Distanță L2: {round(dist, 2)}]</strong><br>"
+        text_snippet = documents[idx][:300] + "..."
+        vector_results.append(score_text + text_snippet)
+        
     time_vector = (time.time() - start_time_vector) * 1000
 
     return {
         "traditional": {
-            "results": bm25_results if bm25_results else ["Niciun rezultat exact găsit."],
+            "results": bm25_results if bm25_results else ["Niciun document nu conține aceste cuvinte exacte."],
             "time_ms": round(time_bm25, 2)
         },
         "vectorial": {
