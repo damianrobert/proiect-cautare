@@ -14,10 +14,11 @@ bm25_index = None
 faiss_index = None
 model = None
 documents = []
+document_categories = []  # Nou: stocăm categoriile documentelor
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global bm25_index, faiss_index, model, documents
+    global bm25_index, faiss_index, model, documents, document_categories
     
     print("1. Descărcăm setul de date '20 Newsgroups'...")
     # Preia texte reale (fără headere de email pentru a păstra textul curat)
@@ -26,6 +27,10 @@ async def lifespan(app: FastAPI):
     # Filtrăm textele goale sau prea scurte și luăm primele 2000 de documente
     raw_docs = [doc.replace('\n', ' ').strip() for doc in newsgroups.data if len(doc.strip()) > 50]
     documents = raw_docs[:2000]
+    
+    # Extragem categoriile corespunzătoare documentelor selectate
+    valid_indices = [i for i, doc in enumerate(newsgroups.data) if len(doc.strip()) > 50][:2000]
+    document_categories = [newsgroups.target_names[newsgroups.target[i]] for i in valid_indices]
 
     print(f"2. Am încărcat {len(documents)} documente. Construim indexul Tradițional (BM25)...")
     tokenized_corpus = [doc.lower().split() for doc in documents]
@@ -64,7 +69,12 @@ def perform_search(request: SearchRequest):
     
     # Luăm top 3 rezultate care au scor > 0
     top_n_bm25 = np.argsort(bm25_scores)[::-1][:3]
-    bm25_results = [documents[i][:300] + "..." for i in top_n_bm25 if bm25_scores[i] > 0]
+    bm25_results = []
+    for i in top_n_bm25:
+        if bm25_scores[i] > 0:
+            category = document_categories[i]
+            text_snippet = documents[i][:300] + "..."
+            bm25_results.append(f"<strong>[{category}]</strong><br>" + text_snippet)
     time_bm25 = (time.time() - start_time_bm25) * 1000
 
     # --- Traseul 2: Căutare Vectorială (FAISS) ---
@@ -76,8 +86,9 @@ def perform_search(request: SearchRequest):
     
     vector_results = []
     for dist, idx in zip(distances[0], indices[0]):
-        # Formatăm rezultatul pentru a arăta și distanța matematică
-        score_text = f"<strong>[Distanță L2: {round(dist, 2)}]</strong><br>"
+        # Formatăm rezultatul pentru a arăta și distanța matematică și categoria
+        category = document_categories[idx]
+        score_text = f"<strong>[Distanță L2: {round(dist, 2)}] [{category}]</strong><br>"
         text_snippet = documents[idx][:300] + "..."
         vector_results.append(score_text + text_snippet)
         
@@ -85,7 +96,7 @@ def perform_search(request: SearchRequest):
 
     return {
         "traditional": {
-            "results": bm25_results if bm25_results else ["Niciun document nu conține aceste cuvinte exacte."],
+            "results": bm25_results,
             "time_ms": round(time_bm25, 2)
         },
         "vectorial": {
