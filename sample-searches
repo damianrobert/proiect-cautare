@@ -1,4 +1,23 @@
-a severe illness
-hardware components for personal computers
-the impact of social media on mental health
-the benefits of regular exercise
+----------------------------------------------------------
+Caută: protecting secrets and sending hidden messages
+
+Tradițional (BM25): Va căuta literal documente care
+conțin cuvintele „secrets”, „hidden”, „messages”.
+Probabil va returna rezultate slabe sau deloc.
+
+
+Vectorial (FAISS): Va înțelege că vorbești despre
+criptografie, criptare sau securitate și îți va
+ aduce articole despre software de criptare 
+ (precum PGP) sau algoritmi de securitate
+----------------------------------------------------------
+Caută: what happens to astronauts when they leave the atmosphere
+
+Tradițional: Va fi complet derutat de cuvintele de legătură
+(„what”, „happens”, „to”, „when”, „they”) și va dilua relevanța.
+
+Vectorial: Va izola intenția (explorarea spațială umană) și
+va returna discuții despre NASA, navete spațiale (shuttle),
+stația spațială sau efectele microgravitației, chiar dacă nu
+conțin exact cuvintele din interogare.
+-----------------------------------------------------------

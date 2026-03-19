@@ -16,6 +16,18 @@ model = None
 documents = []
 document_categories = []  # Nou: stocăm categoriile documentelor
 
+def highlight_keywords(text, keywords):
+    """Evidențiază cuvintele cheie în text folosind HTML tags"""
+    import re
+    highlighted_text = text
+    
+    for keyword in keywords:
+        # Folosim regex pentru a găsi cuvântul exact (case-insensitive)
+        pattern = re.compile(r'(?i)\b' + re.escape(keyword) + r'\b')
+        highlighted_text = pattern.sub(f'<mark>{keyword}</mark>', highlighted_text)
+    
+    return highlighted_text
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global bm25_index, faiss_index, model, documents, document_categories
@@ -54,6 +66,10 @@ app = FastAPI(lifespan=lifespan)
 class SearchRequest(BaseModel):
     query: str
 
+class DocumentRequest(BaseModel):
+    id: int
+    query: str
+
 @app.get("/")
 def serve_frontend():
     return FileResponse("app/index.html")
@@ -74,7 +90,14 @@ def perform_search(request: SearchRequest):
         if bm25_scores[i] > 0:
             category = document_categories[i]
             text_snippet = documents[i][:300] + "..."
-            bm25_results.append(f"<strong>[{category}]</strong><br>" + text_snippet)
+            highlighted_snippet = highlight_keywords(text_snippet, tokenized_query)
+            highlighted_full_text = highlight_keywords(documents[i], tokenized_query)
+            bm25_results.append({
+                "id": int(i),
+                "category": category,
+                "snippet": highlighted_snippet,
+                "full_text": highlighted_full_text
+            })
     time_bm25 = (time.time() - start_time_bm25) * 1000
 
     # --- Traseul 2: Căutare Vectorială (FAISS) ---
@@ -86,11 +109,15 @@ def perform_search(request: SearchRequest):
     
     vector_results = []
     for dist, idx in zip(distances[0], indices[0]):
-        # Formatăm rezultatul pentru a arăta și distanța matematică și categoria
         category = document_categories[idx]
-        score_text = f"<strong>[Distanță L2: {round(dist, 2)}] [{category}]</strong><br>"
         text_snippet = documents[idx][:300] + "..."
-        vector_results.append(score_text + text_snippet)
+        vector_results.append({
+            "id": int(idx),
+            "category": category,
+            "snippet": text_snippet,
+            "full_text": documents[idx],
+            "distance": float(round(dist, 2))
+        })
         
     time_vector = (time.time() - start_time_vector) * 1000
 
@@ -103,4 +130,22 @@ def perform_search(request: SearchRequest):
             "results": vector_results,
             "time_ms": round(time_vector, 2)
         }
+    }
+
+@app.post("/api/document")
+def get_document(request: DocumentRequest):
+    doc_id = request.id
+    query = request.query
+    
+    if doc_id < 0 or doc_id >= len(documents):
+        return {"error": "Document not found"}
+    
+    # Evidențiem cuvintele cheie în documentul complet
+    tokenized_query = query.lower().split()
+    highlighted_full_text = highlight_keywords(documents[doc_id], tokenized_query)
+    
+    return {
+        "id": doc_id,
+        "category": document_categories[doc_id],
+        "full_text": highlighted_full_text
     }
