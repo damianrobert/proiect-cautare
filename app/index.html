@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vector Search vs Traditional</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #f4f4f9; padding: 20px; text-align: center; }
+        .search-container { margin-bottom: 30px; }
+        input[type="text"] { width: 50%; padding: 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 12px 24px; font-size: 16px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 4px; }
+        .results-wrapper { display: flex; justify-content: space-around; max-width: 1000px; margin: 0 auto; gap: 20px; }
+        .column { flex: 1; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: left; }
+        .time { font-size: 14px; color: #666; font-style: italic; margin-bottom: 15px; }
+        .result-item { background: #eef2f5; padding: 10px; margin-bottom: 10px; border-radius: 4px; border-left: 4px solid #007bff; }
+    </style>
+</head>
+<body>
+
+    <h1>Comparare: Tradițional vs. Vectorial</h1>
+    
+    <div class="search-container">
+        <input type="text" id="searchInput" placeholder="Încearcă să cauți: 'automobil' sau 'pisică'">
+        <button onclick="performSearch()">Caută</button>
+    </div>
+
+    <div class="results-wrapper">
+        <div class="column">
+            <h2>Căutare Tradițională (BM25)</h2>
+            <div class="time" id="time-trad">Timp execuție: 0 ms</div>
+            <div id="results-trad">
+                <p>Aici vor apărea rezultatele bazate pe cuvinte cheie.</p>
+            </div>
+        </div>
+
+        <div class="column">
+            <h2>Căutare Vectorială (FAISS)</h2>
+            <div class="time" id="time-vect">Timp execuție: 0 ms</div>
+            <div id="results-vect">
+                <p>Aici vor apărea rezultatele bazate pe sens și context.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function performSearch() {
+            const query = document.getElementById('searchInput').value;
+            if (!query) return;
+
+            // Resetăm UI-ul în timpul încărcării
+            document.getElementById('results-trad').innerHTML = "<em>Se caută...</em>";
+            document.getElementById('results-vect').innerHTML = "<em>Se caută...</em>";
+
+            try {
+                const response = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: query })
+                });
+                
+                const data = await response.json();
+
+                // Afișăm Tradițional
+                document.getElementById('time-trad').innerText = `Timp execuție: ${data.traditional.time_ms} ms`;
+                document.getElementById('results-trad').innerHTML = data.traditional.results
+                    .map(res => `<div class="result-item">${res}</div>`).join('');
+
+                // Afișăm Vectorial
+                document.getElementById('time-vect').innerText = `Timp execuție: ${data.vectorial.time_ms} ms`;
+                document.getElementById('results-vect').innerHTML = data.vectorial.results
+                    .map(res => `<div class="result-item">${res}</div>`).join('');
+
+            } catch (error) {
+                console.error("Eroare la căutare:", error);
+            }
+        }
+    </script>
+</body>
+</html>
