@@ -8,14 +8,14 @@ from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 from contextlib import asynccontextmanager
 
-# Setul nostru de date demonstrativ (Mini-Dataset)
+# Setul nostru de date demonstrativ în engleză (Mini-Dataset)
 DOCUMENTS = [
-    "Un film despre o mașină rapidă pe străzile din Tokyo.",
-    "Un automobil iute de curse câștigă campionatul.",
-    "O pisică amuzantă care prinde șoareci în hambar.",
-    "O felină adorabilă doarme toată ziua pe canapea.",
-    "Programarea în Python este excelentă pentru inteligența artificială.",
-    "Baze de date vectoriale sunt folosite pentru căutarea semantică."
+    "A movie about a fast car on the streets of Tokyo.",
+    "A quick racing automobile wins the championship.",
+    "A funny cat catching mice in the barn.",
+    "An adorable feline sleeping all day on the couch.",
+    "Programming in Python is great for artificial intelligence.",
+    "Vector databases are used for semantic search."
 ]
 
 # Variabile globale pentru a stoca modelele și indexurile în memorie
