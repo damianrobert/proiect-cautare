@@ -1,6 +1,8 @@
 import time
 import numpy as np
 import faiss
+import pickle
+import os
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 from fastapi import FastAPI
@@ -16,6 +18,11 @@ model = None
 documents = []
 document_categories = []  # Nou: stocăm categoriile documentelor
 
+# Fișiere pentru persistență
+FAISS_INDEX_FILE = "faiss_index.bin"
+DOCUMENTS_FILE = "documents.pkl"
+BM25_FILE = "bm25_index.pkl"
+
 def highlight_keywords(text, keywords):
     """Evidențiază cuvintele cheie în text folosind HTML tags"""
     import re
@@ -28,35 +35,162 @@ def highlight_keywords(text, keywords):
     
     return highlighted_text
 
+def save_to_disk():
+    """Salvează indexele și documentele pe disc"""
+    print("5. Salvăm datele pe disc pentru cache...")
+    
+    # Salvăm indexul FAISS
+    faiss.write_index(faiss_index, FAISS_INDEX_FILE)
+    
+    # Salvăm documentele și categoriile
+    with open(DOCUMENTS_FILE, 'wb') as f:
+        pickle.dump({
+            'documents': documents,
+            'categories': document_categories
+        }, f)
+    
+    # Salvăm indexul BM25
+    with open(BM25_FILE, 'wb') as f:
+        pickle.dump(bm25_index, f)
+    
+    print("Datele au fost salvate cu succes!")
+
+def load_from_disk():
+    """Încarcă indexele și documentele de pe disc"""
+    if not all(os.path.exists(f) for f in [FAISS_INDEX_FILE, DOCUMENTS_FILE, BM25_FILE]):
+        return False
+    
+    print("Încărcăm datele din cache...")
+    
+    # Încărcăm indexul FAISS
+    faiss_index_loaded = faiss.read_index(FAISS_INDEX_FILE)
+    
+    # Încărcăm documentele și categoriile
+    with open(DOCUMENTS_FILE, 'rb') as f:
+        data = pickle.load(f)
+        documents_loaded = data['documents']
+        categories_loaded = data['categories']
+    
+    # Încărcăm indexul BM25
+    with open(BM25_FILE, 'rb') as f:
+        bm25_index_loaded = pickle.load(f)
+    
+    return faiss_index_loaded, documents_loaded, categories_loaded, bm25_index_loaded
+
+def reciprocal_rank_fusion(bm25_results, vector_results, k=60):
+    """
+    Reciprocal Rank Fusion (RRF) - combină rezultatele din multiple sisteme de căutare
+    Formula: 1 / (k + rank) unde k este constantă (de obicei 60)
+    """
+    fusion_scores = {}
+    
+    # Adăugăm scorurile BM25 (rank-ul pornește de la 1)
+    for rank, result in enumerate(bm25_results, 1):
+        doc_id = result['id']
+        rrf_score = 1.0 / (k + rank)
+        fusion_scores[doc_id] = {
+            'rrf_score': rrf_score,
+            'bm25_rank': rank,
+            'vector_rank': None,
+            'category': result['category'],
+            'snippet': result['snippet'],
+            'full_text': result['full_text'],
+            'bm25_score': result['bm25_score']
+        }
+    
+    # Adăugăm scorurile Vectoriale
+    for rank, result in enumerate(vector_results, 1):
+        doc_id = result['id']
+        rrf_score = 1.0 / (k + rank)
+        
+        if doc_id in fusion_scores:
+            # Documentul apare în ambele rezultate - combinăm scorurile
+            fusion_scores[doc_id]['rrf_score'] += rrf_score
+            fusion_scores[doc_id]['vector_rank'] = rank
+            fusion_scores[doc_id]['similarity'] = result['similarity']
+        else:
+            # Documentul apare doar în rezultatele vectoriale
+            fusion_scores[doc_id] = {
+                'rrf_score': rrf_score,
+                'bm25_rank': None,
+                'vector_rank': rank,
+                'category': result['category'],
+                'snippet': result['snippet'],
+                'full_text': result['full_text'],
+                'similarity': result['similarity']
+            }
+    
+    # Sortăm după scorul RRF descrescător
+    sorted_results = sorted(fusion_scores.items(), key=lambda x: x[1]['rrf_score'], reverse=True)
+    
+    # Returnăm top 5 rezultate hibride
+    hybrid_results = []
+    for doc_id, data in sorted_results[:5]:
+        result = {
+            'id': doc_id,
+            'category': data['category'],
+            'snippet': data['snippet'],
+            'full_text': data['full_text'],
+            'rrf_score': float(round(data['rrf_score'], 4)),
+            'bm25_rank': data['bm25_rank'],
+            'vector_rank': data['vector_rank']
+        }
+        
+        # Adăugăm scorurile specifice dacă există
+        if 'bm25_score' in data:
+            result['bm25_score'] = data['bm25_score']
+        if 'similarity' in data:
+            result['similarity'] = data['similarity']
+            
+        hybrid_results.append(result)
+    
+    return hybrid_results
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global bm25_index, faiss_index, model, documents, document_categories
     
-    print("1. Descărcăm setul de date '20 Newsgroups'...")
-    # Preia texte reale (fără headere de email pentru a păstra textul curat)
-    newsgroups = fetch_20newsgroups(subset='all', remove=('headers', 'footers', 'quotes'))
-    
-    # Filtrăm textele goale sau prea scurte și luăm primele 2000 de documente
-    raw_docs = [doc.replace('\n', ' ').strip() for doc in newsgroups.data if len(doc.strip()) > 50]
-    documents = raw_docs[:2000]
-    
-    # Extragem categoriile corespunzătoare documentelor selectate
-    valid_indices = [i for i, doc in enumerate(newsgroups.data) if len(doc.strip()) > 50][:2000]
-    document_categories = [newsgroups.target_names[newsgroups.target[i]] for i in valid_indices]
+    # Încercăm să încărcăm din cache
+    cached_data = load_from_disk()
+    if cached_data:
+        faiss_index, documents, document_categories, bm25_index = cached_data
+        print("Datele au fost încărcate din cache în < 1 secundă!")
+    else:
+        print("Nu am găsit cache. Construim totul de la zero...")
+        
+        print("1. Descărcăm setul de date '20 Newsgroups'...")
+        # Preia texte reale (fără headere de email pentru a păstra textul curat)
+        newsgroups = fetch_20newsgroups(subset='all', remove=('headers', 'footers', 'quotes'))
+        
+        # Filtrăm textele goale sau prea scurte și luăm primele 2000 de documente
+        raw_docs = [doc.replace('\n', ' ').strip() for doc in newsgroups.data if len(doc.strip()) > 50]
+        documents = raw_docs[:2000]
+        
+        # Extragem categoriile corespunzătoare documentelor selectate
+        valid_indices = [i for i, doc in enumerate(newsgroups.data) if len(doc.strip()) > 50][:2000]
+        document_categories = [newsgroups.target_names[newsgroups.target[i]] for i in valid_indices]
 
-    print(f"2. Am încărcat {len(documents)} documente. Construim indexul Tradițional (BM25)...")
-    tokenized_corpus = [doc.lower().split() for doc in documents]
-    bm25_index = BM25Okapi(tokenized_corpus)
+        print(f"2. Am încărcat {len(documents)} documente. Construim indexul Tradițional (BM25)...")
+        tokenized_corpus = [doc.lower().split() for doc in documents]
+        bm25_index = BM25Okapi(tokenized_corpus)
 
-    print("3. Încărcăm modelul AI (MiniLM)...")
-    model = SentenceTransformer('all-MiniLM-L6-v2')
+        print("3. Încărcăm modelul AI (MiniLM)...")
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+        
+        print("4. Transformăm documentele în vectori (Acest proces va dura 10-30 de secunde)...")
+        document_embeddings = model.encode(documents)
+        
+        dimension = document_embeddings.shape[1]
+        faiss_index = faiss.IndexFlatL2(dimension)
+        faiss_index.add(document_embeddings)
+        
+        # Salvăm pentru viitoarele rulări
+        save_to_disk()
     
-    print("4. Transformăm documentele în vectori (Acest proces va dura 10-30 de secunde)...")
-    document_embeddings = model.encode(documents)
-    
-    dimension = document_embeddings.shape[1]
-    faiss_index = faiss.IndexFlatL2(dimension)
-    faiss_index.add(document_embeddings)
+    # Asigurăm că modelul este încărcat (nu îl salvăm în cache)
+    if model is None:
+        print("Încărcăm modelul AI (MiniLM)...")
+        model = SentenceTransformer('all-MiniLM-L6-v2')
     
     print("Sistemul este complet gata de utilizare!")
     yield
@@ -96,7 +230,8 @@ def perform_search(request: SearchRequest):
                 "id": int(i),
                 "category": category,
                 "snippet": highlighted_snippet,
-                "full_text": highlighted_full_text
+                "full_text": highlighted_full_text,
+                "bm25_score": float(round(bm25_scores[i], 2))
             })
     time_bm25 = (time.time() - start_time_bm25) * 1000
 
@@ -111,12 +246,18 @@ def perform_search(request: SearchRequest):
     for dist, idx in zip(distances[0], indices[0]):
         category = document_categories[idx]
         text_snippet = documents[idx][:300] + "..."
+        
+        # Transformăm distanța L2 în procentaj de similaritate
+        # Folosim formula: similarity = exp(-distance) * 100
+        # Astfel, distanță 0 -> 100%, distanță mare -> aproape 0%
+        similarity = float(round(np.exp(-dist) * 100, 1))
+        
         vector_results.append({
             "id": int(idx),
             "category": category,
             "snippet": text_snippet,
             "full_text": documents[idx],
-            "distance": float(round(dist, 2))
+            "similarity": similarity
         })
         
     time_vector = (time.time() - start_time_vector) * 1000
@@ -129,6 +270,71 @@ def perform_search(request: SearchRequest):
         "vectorial": {
             "results": vector_results,
             "time_ms": round(time_vector, 2)
+        }
+    }
+
+@app.post("/api/hybrid-search")
+def perform_hybrid_search(request: SearchRequest):
+    q = request.query
+    
+    # --- Traseul 1: Căutare Tradițională (BM25) ---
+    start_time_bm25 = time.time()
+    tokenized_query = q.lower().split()
+    bm25_scores = bm25_index.get_scores(tokenized_query)
+    
+    # Luăm top 5 rezultate pentru RRF
+    top_n_bm25 = np.argsort(bm25_scores)[::-1][:5]
+    bm25_results = []
+    for i in top_n_bm25:
+        if bm25_scores[i] > 0:
+            category = document_categories[i]
+            text_snippet = documents[i][:300] + "..."
+            highlighted_snippet = highlight_keywords(text_snippet, tokenized_query)
+            highlighted_full_text = highlight_keywords(documents[i], tokenized_query)
+            bm25_results.append({
+                "id": int(i),
+                "category": category,
+                "snippet": highlighted_snippet,
+                "full_text": highlighted_full_text,
+                "bm25_score": float(round(bm25_scores[i], 2))
+            })
+    time_bm25 = (time.time() - start_time_bm25) * 1000
+
+    # --- Traseul 2: Căutare Vectorială (FAISS) ---
+    start_time_vector = time.time()
+    query_vector = model.encode([q])
+    
+    # Căutăm top 5 rezultate pentru RRF
+    distances, indices = faiss_index.search(query_vector, 5) 
+    
+    vector_results = []
+    for dist, idx in zip(distances[0], indices[0]):
+        category = document_categories[idx]
+        text_snippet = documents[idx][:300] + "..."
+        
+        # Transformăm distanța L2 în procentaj de similaritate
+        similarity = float(round(np.exp(-dist) * 100, 1))
+        
+        vector_results.append({
+            "id": int(idx),
+            "category": category,
+            "snippet": text_snippet,
+            "full_text": documents[idx],
+            "similarity": similarity
+        })
+        
+    time_vector = (time.time() - start_time_vector) * 1000
+
+    # --- Traseul 3: Fuziune Hibridă (RRF) ---
+    start_time_hybrid = time.time()
+    hybrid_results = reciprocal_rank_fusion(bm25_results, vector_results)
+    time_hybrid = (time.time() - start_time_hybrid) * 1000
+
+    return {
+        "hybrid": {
+            "results": hybrid_results,
+            "time_ms": round(time_hybrid, 2),
+            "total_time_ms": round(time_bm25 + time_vector + time_hybrid, 2)
         }
     }
 
