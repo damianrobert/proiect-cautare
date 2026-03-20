@@ -4,7 +4,7 @@ import faiss
 import pickle
 import os
 from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -15,6 +15,7 @@ from sklearn.datasets import fetch_20newsgroups
 bm25_index = None
 faiss_index = None
 model = None
+cross_encoder = None
 documents = []
 document_categories = []  # Nou: stocăm categoriile documentelor
 
@@ -76,6 +77,73 @@ def load_from_disk():
         bm25_index_loaded = pickle.load(f)
     
     return faiss_index_loaded, documents_loaded, categories_loaded, bm25_index_loaded
+
+def cross_encoder_rerank(query, candidate_docs, top_k=5):
+    """
+    Re-ranking cu Cross-Encoder - arhitectură în 2 etape
+    Etapa 1: Bi-Encoder/BM25 pentru filtrare rapidă (candidați)
+    Etapa 2: Cross-Encoder pentru re-ranking fin (acuratețe)
+    """
+    if not candidate_docs:
+        return []
+    
+    # Pregătim perechile (query, document) pentru Cross-Encoder
+    cross_inputs = [[query, doc['full_text']] for doc in candidate_docs]
+    
+    # Cross-Encoder scoruri - citește query și document simultan
+    cross_scores = cross_encoder.predict(cross_inputs)
+    
+    # Adăugăm scorurile Cross-Encoder la documente
+    for i, doc in enumerate(candidate_docs):
+        doc['cross_score'] = float(round(cross_scores[i], 4))
+    
+    # Sortăm după scorul Cross-Encoder descrescător
+    reranked_docs = sorted(candidate_docs, key=lambda x: x['cross_score'], reverse=True)
+    
+    return reranked_docs[:top_k]
+
+def hybrid_search_with_reranking(query, top_candidates=20, final_results=5):
+    """
+    Pipeline complet: BM25 + Vector → RRF → Cross-Encoder Re-ranking
+    """
+    # Etapa 1: Căutare BM25 (extinsă pentru mai mulți candidați)
+    tokenized_query = query.lower().split()
+    bm25_scores = bm25_index.get_scores(tokenized_query)
+    top_n_bm25 = np.argsort(bm25_scores)[::-1][:top_candidates]
+    
+    bm25_candidates = []
+    for i in top_n_bm25:
+        if bm25_scores[i] > 0:
+            bm25_candidates.append({
+                "id": int(i),
+                "category": document_categories[i],
+                "snippet": documents[i][:300] + "...",
+                "full_text": documents[i],
+                "bm25_score": float(round(bm25_scores[i], 2))
+            })
+    
+    # Etapa 2: Căutare Vectorială (extinsă)
+    query_vector = model.encode([query])
+    distances, indices = faiss_index.search(query_vector, top_candidates)
+    
+    vector_candidates = []
+    for dist, idx in zip(distances[0], indices[0]):
+        similarity = float(round(np.exp(-dist) * 100, 1))
+        vector_candidates.append({
+            "id": int(idx),
+            "category": document_categories[idx],
+            "snippet": documents[idx][:300] + "...",
+            "full_text": documents[idx],
+            "similarity": similarity
+        })
+    
+    # Etapa 3: Fuziune RRF pentru top candidați
+    hybrid_candidates = reciprocal_rank_fusion(bm25_candidates, vector_candidates)
+    
+    # Etapa 4: Cross-Encoder Re-ranking
+    final_results = cross_encoder_rerank(query, hybrid_candidates, final_results)
+    
+    return final_results
 
 def reciprocal_rank_fusion(bm25_results, vector_results, k=60):
     """
@@ -148,7 +216,7 @@ def reciprocal_rank_fusion(bm25_results, vector_results, k=60):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global bm25_index, faiss_index, model, documents, document_categories
+    global bm25_index, faiss_index, model, cross_encoder, documents, document_categories
     
     # Încercăm să încărcăm din cache
     cached_data = load_from_disk()
@@ -191,6 +259,11 @@ async def lifespan(app: FastAPI):
     if model is None:
         print("Încărcăm modelul AI (MiniLM)...")
         model = SentenceTransformer('all-MiniLM-L6-v2')
+    
+    # Încărcăm Cross-Encoder pentru re-ranking
+    if cross_encoder is None:
+        print("Încărcăm Cross-Encoder pentru re-ranking fin...")
+        cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
     
     print("Sistemul este complet gata de utilizare!")
     yield
@@ -335,6 +408,31 @@ def perform_hybrid_search(request: SearchRequest):
             "results": hybrid_results,
             "time_ms": round(time_hybrid, 2),
             "total_time_ms": round(time_bm25 + time_vector + time_hybrid, 2)
+        }
+    }
+
+@app.post("/api/rerank-search")
+def perform_rerank_search(request: SearchRequest):
+    q = request.query
+    
+    # Pipeline complet: BM25 + Vector → RRF → Cross-Encoder
+    start_time_total = time.time()
+    
+    # Etapa 1-4: Pipeline complet cu Cross-Encoder re-ranking
+    final_results = hybrid_search_with_reranking(q, top_candidates=20, final_results=5)
+    
+    # Evidențiem cuvintele cheie în rezultatele finale
+    tokenized_query = q.lower().split()
+    for result in final_results:
+        result['snippet'] = highlight_keywords(result['snippet'], tokenized_query)
+    
+    total_time = (time.time() - start_time_total) * 1000
+    
+    return {
+        "rerank": {
+            "results": final_results,
+            "time_ms": round(total_time, 2),
+            "pipeline": "BM25 + Vector → RRF → Cross-Encoder"
         }
     }
 

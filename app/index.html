@@ -18,6 +18,7 @@
         .score-tag { background: #28a745; color: white; padding: 2px 8px; border-radius: 12px; font-size: 12px; margin-left: 5px; display: inline-block; }
         .hybrid-tag { background: #6f42c1; color: white; padding: 2px 8px; border-radius: 12px; font-size: 12px; margin-left: 5px; display: inline-block; }
         .bm25-tag { background: #17a2b8; color: white; padding: 2px 8px; border-radius: 12px; font-size: 12px; margin-left: 5px; display: inline-block; }
+        .rerank-tag { background: #dc3545; color: white; padding: 2px 8px; border-radius: 12px; font-size: 12px; margin-left: 5px; display: inline-block; }
         .rank-info { font-size: 11px; color: #666; margin-top: 5px; }
         .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); }
         .modal-content { background-color: white; margin: 5% auto; padding: 20px; border-radius: 8px; width: 80%; max-width: 800px; max-height: 80vh; overflow-y: auto; }
@@ -71,6 +72,28 @@
             <div class="time" id="time-hybrid">Timp execuție total: 0 ms</div>
             <div id="results-hybrid">
                 <p>Aici vor apărea rezultatele combinate inteligent din ambele metode.</p>
+            </div>
+        </div>
+    </div>
+
+    <hr style="margin: 40px 0; border: 1px solid #ddd;">
+    
+    <h1>Re-ranking cu Cross-Encoder</h1>
+    <p style="text-align: center; color: #666; margin-bottom: 20px;">
+        Arhitectură în 2 etape: Filtrare rapidă (BM25 + Vector) + Re-ranking fin (Cross-Encoder) - standardul de aur RAG
+    </p>
+    
+    <div class="search-container">
+        <input type="text" id="rerankSearchInput" placeholder="Re-ranking avansat: 'computer vision algorithms', 'database optimization', 'neural networks'">
+        <button onclick="performRerankSearch()">Cross-Encoder Search</button>
+    </div>
+
+    <div class="results-wrapper">
+        <div class="column" style="max-width: 800px; margin: 0 auto;">
+            <h2>Re-ranking Results (Cross-Encoder)</h2>
+            <div class="time" id="time-rerank">Pipeline: BM25 + Vector → RRF → Cross-Encoder | Timp: 0 ms</div>
+            <div id="results-rerank">
+                <p>Aici vor apărea rezultatele re-ordonate cu Cross-Encoder pentru acuratețe maximă.</p>
             </div>
         </div>
     </div>
@@ -160,6 +183,53 @@
             const modal = document.getElementById('documentModal');
             if (event.target == modal) {
                 closeModal();
+            }
+        }
+
+        async function performRerankSearch() {
+            const query = document.getElementById('rerankSearchInput').value;
+            if (!query) return;
+
+            // Resetăm UI-ul în timpul încărcării
+            document.getElementById('results-rerank').innerHTML = "<em>Se realizează re-ranking cu Cross-Encoder...</em>";
+
+            try {
+                const response = await fetch('/api/rerank-search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: query })
+                });
+                
+                const data = await response.json();
+
+                // Afișăm rezultatele re-ranked
+                document.getElementById('time-rerank').innerText = `Pipeline: ${data.rerank.pipeline} | Timp: ${data.rerank.time_ms} ms`;
+                document.getElementById('results-rerank').innerHTML = data.rerank.results
+                    .map((res, index) => {
+                        let tags = [`<span class="category-tag">${res.category}</span>`];
+                        tags.push(`<span class="rerank-tag">Cross-Encoder: ${res.cross_score}</span>`);
+                        
+                        if (res.rrf_score !== undefined) tags.push(`<span class="hybrid-tag">RRF: ${res.rrf_score}</span>`);
+                        if (res.bm25_score !== undefined) tags.push(`<span class="bm25-tag">BM25: ${res.bm25_score}</span>`);
+                        if (res.similarity !== undefined) tags.push(`<span class="score-tag">Sim: ${res.similarity}%</span>`);
+                        
+                        let rankInfo = `Final Rank: #${index + 1}`;
+                        if (res.bm25_rank !== null || res.vector_rank !== null) {
+                            let originalRanks = [];
+                            if (res.bm25_rank !== null) originalRanks.push(`BM25:#${res.bm25_rank}`);
+                            if (res.vector_rank !== null) originalRanks.push(`Vec:#${res.vector_rank}`);
+                            rankInfo += ` (Original: ${originalRanks.join(' | ')})`;
+                        }
+                        
+                        return `<div class="result-item" onclick="showDocument(${res.id}, '${query.replace(/'/g, "\\'")}')">
+                            ${tags.join('')}
+                            <div class="rank-info">${rankInfo}</div>
+                            <div>${res.snippet}</div>
+                        </div>`;
+                    }).join('');
+
+            } catch (error) {
+                console.error("Eroare la re-ranking:", error);
             }
         }
 
